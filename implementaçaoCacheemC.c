@@ -1,259 +1,336 @@
 // SIMULADOR DE CACHE
 // ARQUITETURA E ORGANIZAÇÃO DE COMPUTADORES II
-// Larissa Gabriela
+// Larissa Gabriela e Vitória Santa Lucia
 
-#include <stdio.h>    
-#include <stdlib.h> 
-#include <stdint.h>   // Biblioteca para tipos inteiros fixos (uint32_t, uint64_t)
-#include <time.h>     // Biblioteca para gerar números aleatórios (rand, srand)
+#include <stdio.h>   // biblioteca padrão para entrada/saída (printf, fopen, fread, etc.)
+#include <stdlib.h>  // funções como malloc, free, atoi
+#include <stdint.h>  // tipos inteiros com tamanho fixo (uint32_t, uint64_t)
+#include <time.h>    // para inicializar o gerador randômico (srand)
 
-// ========================================================
-// Função: ntohl (Network to Host Long)
-// Descrição: Converte um número de 32 bits da ordem de bytes
-//            "little-endian" (Intel) para "big-endian".
-//            Necessário porque fread lê os bytes na ordem original do arquivo.
-// ========================================================
-static uint32_t ntohl(uint32_t x) {
-    return ((x & 0xFF) << 24) |         // move o byte menos significativo para o mais significativo
-           ((x & 0xFF00) << 8) |        // move o 2º byte para a posição correta
-           ((x & 0xFF0000) >> 8) |      // move o 3º byte para a posição correta
-           ((x & 0xFF000000) >> 24);    // move o byte mais significativo para o menos significativo
-}
+//------------------------------
+// Limites máximos para segurança
+//------------------------------
+#define MAX_ASSOC 32  // associatividade máxima da cache (vias por conjunto)
+#define MAX_SETS 8192 // número máximo de conjuntos na cache
 
-// ========================================================
-// Constantes para segurança
-// Limita o tamanho máximo da associatividade e número de conjuntos
-#define MAX_ASSOC 32
-#define MAX_SETS 8192
-
-// ========================================================
-// Estrutura CacheBlock
-// Representa um bloco individual da cache
+//-----------------------------------------------
+// Estrutura para representar cada bloco da cache
+//-----------------------------------------------
 typedef struct {
-    int valid;             // 1 se o bloco é válido, 0 se está vazio
-    uint32_t tag;          // Tag do endereço armazenado
-    int lru_counter;       // Contador para política LRU/FIFO
+    int valid;             // 1 se o bloco contém dados válidos, 0 se está vazio
+    uint32_t tag;          // variavel que guarda valor de TAG/parte do endereço usada para identificar o bloco. Dira se bloco que ta mana memoria principal é mesmo da cache e se for é HIT
+    int lru_counter;       // contador usado para política LRU/FIFO : funciona como linha do tempo, para saber qual bloco trocar e se atualiza a cada busca
 } CacheBlock;
 
-// Ponteiro para a matriz 2D de blocos da cache
-CacheBlock **cache;
+CacheBlock **cache; // matriz dinâmica da cache: linhas = nsets, colunas = assoc
 
-// ========================================================
-// Estrutura VisitSet
-// Guarda todas as (index, tag) já acessadas para classificar os misses
+//-----------------------------------------------
+// Estrutura para rastrear os blocos já acessados
+//-----------------------------------------------
 typedef struct {
-    uint32_t *tags;    // Vetor dinâmico que armazena tags visitadas
-    int size;          // Número atual de tags armazenadas
-    int capacity;      // Capacidade máxima antes de expandir
+    uint32_t *tags;  // vetor com as chaves (índice + tag) dos blocos visitados. Guarda todas as TAGS/endereços que passaram pela cache e é importante para miss compulsorio
+    int size;        // número de elementos atualmente no vetor
+    int capacity;    // capacidade máxima do vetor (aumenta com realloc). Comecei com 100, mas pode aumentar
 } VisitSet;
 
-VisitSet set_visitado;  // Instância global para rastrear os acessos
+VisitSet set_visitado; // instância global para armazenar tags visitadas. Precisa ser Global
 
-// ========================================================
+//-----------------------------------------------
 // Variáveis globais para estatísticas
-int total_acessos = 0;         // Total de acessos à cache
-int hits = 0;                  // Número de hits
-int miss_total = 0;            // Número total de misses
-int miss_compulsorio = 0;      // Misses compulsórios
-int miss_conflito = 0;         // Misses por conflito
-int miss_capacidade = 0;       // Misses por capacidade
-int blocos_validos = 0;        // Quantidade de blocos válidos na cache
+//-----------------------------------------------
+int total_acessos = 0;      // total de acessos simulados
+int hits = 0;               // número de hits
+int miss_compulsorio = 0;   // misses compulsórios
+int miss_total = 0;         // total de misses
+int miss_conflito = 0;      // misses por conflito
+int miss_capacidade = 0;    // misses por capacidade
+int blocos_validos = 0;     // número de blocos válidos carregados na cache
 
-// ========================================================
-// Protótipos de funções
-int is_potencia2(int x);  // Verifica se número é potência de 2
-int log2int(int x);       // Calcula log base 2 (inteiro)
-void inicializar_visitado(); // Inicializa o vetor de tags visitadas
-void liberar_visitado();     // Libera memória alocada pelo VisitSet
-void inicializar_cache(int nsets, int assoc); // Cria e zera a cache
-FILE* processar_arquivo(char *f); // Abre arquivo de entrada
-void simular_acesso_cache(uint32_t _endereco, int nsets, int bsize, int assoc, char *sub); // Simula o acesso à cache
-void imprimir_estatisticas(int flag, int flag_out); // Imprime estatísticas finais
+//-----------------------------------------------
+// Protótipos das funções
+//-----------------------------------------------
+int is_potencia2(int x); // ter certeza se é potencia de 2, pois em AOC e vida real usa Pot de 2 e inclusive para saber Offset e indice/index
+void inicializar_visitado();
+void liberar_visitado();
+void inicializar_cache(int nsets, int assoc); //matriz
+FILE* processar_arquivo(char *f);
+void simular_acesso_cache(uint32_t _endereco, int nsets, int bsize, int assoc, char *sub);
+void imprimir_estatisticas(int flag, int flag_out);
+uint32_t inverter_big_endian(uint32_t x); // função para corrigir endianness
 
-// ========================================================
-// Corpo das funções
-// ========================================================
+//-----------------------------------------------
+// FUNÇÃO PARA INVERTER BIG-ENDIAN ↔ LITTLE-ENDIAN : precisa pois tava dando erro em taxa de miss,  ja que tava lendo invertido
+//-----------------------------------------------
+uint32_t inverter_big_endian(uint32_t x) {
+    /*
+     O parâmetro `x` é um número de 32 bits (4 bytes) que representaum endereço lido do arquivo binário.
+    Em arquiteturas little-endian (ex.: Intel x86), os bytes são armazenados do menos significativo para o mais significativo.
+    Se o arquivo foi gerado em uma máquina big-endian, precisamos trocar a ordem dos bytes para interpretar o número corretamente.
+     */
 
-// --------------------------------------------------------
-// Função: is_potencia2
-// Descrição: verifica se um número é potência de 2
-// --------------------------------------------------------
+    unsigned char *bytes = (unsigned char*)&x;
+    /*
+     `unsigned char *bytes` cria um ponteiro para os 4 bytes individuais de `x`.
+      Assim podemos acessar e trocar cada byte separadamente.
+     */
+
+    unsigned char temp; // variável auxiliar para troca (swap) de bytes
+
+    // 📌 Troca o primeiro byte (MSB) com o último (LSB)
+    temp = bytes[0];
+    bytes[0] = bytes[3];
+    bytes[3] = temp;
+
+    // 📌 Troca o segundo byte com o terceiro
+    temp = bytes[1];
+    bytes[1] = bytes[2];
+    bytes[2] = temp;
+
+    /*
+     * 🟢 Por que não fazemos `bytes[1] = bytes[3]`?
+     * Porque queremos inverter a ordem dos bytes simetricamente:
+     * bytes[0] <-> bytes[3]  (primeiro com último)
+     * bytes[1] <-> bytes[2]  (segundo com terceiro)
+     * Isso garante que o número seja lido na ordem correta.
+     */
+
+    return x; // retorna o número com os bytes invertidos
+}
+
+// Verifica se um número é potência de 2
+//-----------------------------------------------
 int is_potencia2(int x) {
-    if (x <= 0) return 0;          // Número <=0 não é potência de 2
+    if (x <= 0) return 0;  // números <= 0 não são potências de 2
+
     while (x > 1) {
-        if (x % 2 != 0) return 0;  // Se não é divisível por 2, não é potência de 2
-        x = x / 2;                 // Divide por 2
+        if (x % 2 != 0) return 0; // se resto != 0, não é potência de 2
+        x /= 2; // divide por 2 até chegar a 1
     }
-    return 1;                      // Se chegou a 1, é potência de 2
+
+    return 1; // é potência de 2
 }
 
-// --------------------------------------------------------
-// Função: log2int
-// Descrição: retorna quantos bits são necessários para representar o número
-// Exemplo: log2(8) = 3 porque 2^3 = 8
-// --------------------------------------------------------
-int log2int(int x) {
-    int resultado_log = 0;
-    while (x > 1) {
-        x = x / 2;
-        resultado_log++;           // Conta quantas divisões por 2 foram feitas
-    }
-    return resultado_log;
-}
-
-// --------------------------------------------------------
-// Função: inicializar_visitado
-// Descrição: cria vetor para armazenar as tags já visitadas
-// --------------------------------------------------------
+// Inicializa o vetor que rastreia tags visitadas
+//-----------------------------------------------
 void inicializar_visitado() {
-    set_visitado.tags = malloc(100 * sizeof(uint32_t)); // Aloca espaço inicial para 100 elementos
-    set_visitado.capacity = 100;                        // Define capacidade inicial
-    set_visitado.size = 0;                               // Nenhuma tag armazenada no início
+    set_visitado.tags = malloc(100 * sizeof(uint32_t)); // aloca espaço inicial para 100 tags
+    set_visitado.capacity = 100; // define capacidade inicial
+    set_visitado.size = 0;       // ainda não há elementos no vetor
 }
 
-// --------------------------------------------------------
-// Função: liberar_visitado
-// Descrição: libera memória usada pelo VisitSet
-// --------------------------------------------------------
+//-----------------------------------------------
+// Libera memória alocada para o vetor visitado
+//-----------------------------------------------
 void liberar_visitado() {
-    free(set_visitado.tags);
+    free(set_visitado.tags); // libera memória do vetor
 }
 
-// --------------------------------------------------------
-// Função: inicializar_cache
-// Descrição: cria uma matriz 2D representando os conjuntos e as vias da cache
-// --------------------------------------------------------
+// Inicializa a cache como matriz dinâmica
 void inicializar_cache(int nsets, int assoc) {
-    cache = malloc(nsets * sizeof(CacheBlock*));      // Aloca vetor de linhas
+    cache = malloc(nsets * sizeof(CacheBlock*)); // aloca linhas/conjuntos/nsets da cache
+
     for (int i = 0; i < nsets; i++) {
-        cache[i] = malloc(assoc * sizeof(CacheBlock)); // Aloca vetor de colunas (vias) para cada linha
+        cache[i] = malloc(assoc * sizeof(CacheBlock)); // aloca colunas(vias) para cada linha
+
         for (int j = 0; j < assoc; j++) {
-            cache[i][j] = (CacheBlock){0, 0, 0};      // Inicializa blocos como inválidos
+            cache[i][j] = (CacheBlock){0, 0, 0}; // inicializa cada bloco, pega da struct. Tag = 0 , valid = 0 e lru_counter = 0
         }
     }
-    blocos_validos = 0;                               // Nenhum bloco está válido inicialmente
+    blocos_validos = 0; // nenhum bloco foi carregado ainda
 }
-
-// --------------------------------------------------------
-// Função: processar_arquivo
-// Descrição: abre o arquivo binário de entrada
-// --------------------------------------------------------
+// Abre o arquivo binário para leitura
 FILE *processar_arquivo(char *arquivo_de_entrada) {
-    FILE *fp = fopen(arquivo_de_entrada, "rb");       // Abre arquivo para leitura binária
+    FILE *fp = fopen(arquivo_de_entrada, "rb");
+
     if (!fp) {
-        perror("Erro ao abrir o arquivo");            // Mostra erro no terminal
-        return NULL;                                  // Retorna NULL se falhou
+        perror("Erro ao abrir o arquivo");
+        return NULL;
     }
-    return fp;
+
+    return fp; // retorna ponteiro
 }
 
-// --------------------------------------------------------
-// Função: simular_acesso_cache
-// Descrição: faz o processamento do endereço e simula o acesso à cache
-// --------------------------------------------------------
+// Simula o acesso de um endereço à cache
 void simular_acesso_cache(uint32_t _endereco, int nsets, int bsize, int assoc, char *substituicao) {
-    total_acessos++;                                  // Incrementa total de acessos
-    uint32_t endereco = ntohl(_endereco);             // Corrige ordem de bytes
+    total_acessos++; // incrementa contador de acessos
 
-    // Divide o endereço em offset, índice e tag
-    int offset_bits = log2int(bsize);                 // Quantidade de bits para offset
-    int index_bits  = log2int(nsets);                 // Quantidade de bits para índice
-    uint32_t index  = (endereco >> offset_bits) & (nsets - 1); // Isola índice
-    uint32_t tag    = endereco >> (offset_bits + index_bits);  // Isola tag
+    //------------------------------------
+    // Corrige endianness do endereço lido
+    //------------------------------------
+    uint32_t endereco = inverter_big_endian(_endereco);
+    /*
+      Endereços lidos do arquivo podem estar em big-endian.
+      Se o simulador está rodando em uma máquina little-endian, precisamos inverter os bytes para evitar erros no cálculo do índice/tag.
+     */
 
-    // Verifica se é HIT
+    //------------------------------------
+    // Calcula índice e tag
+    //------------------------------------
+    uint32_t endereco_sem_offset = endereco / bsize;
+    /*
+     * 📌 Remove os bits de offset dividindo pelo tamanho do bloco.
+     * Exemplo: Se bsize = 16, os 4 bits menos significativos representam o offset.
+     ou seja, sobra TAG e INDICE
+     */
+    uint32_t index = endereco_sem_offset % nsets;
+    /*
+     * 📌 Isola os bits do índice aplicando módulo nsets. = pega so os bits RESTANTES para indice
+     */
+    uint32_t tag = endereco_sem_offset / nsets;
+    /*
+     * 📌 Remove os bits do índice e offset para extrair a tag. Nao pode fazer como na teorica 32 - indice - offset , pois estamos descartando offset
+//no livro de petterson, em mapeamento por conjunto,no capitulo 5, endereçamento de cache, fala que se remove o ofset dividindo por tamanho do bloco e depois
+// %nsets pega indice e /nesets pega tag
+
+
+    //------------------------------------
+    // Verifica se o bloco já está na cache (hit)
+    ?*/
     int hit = 0;
-    for (int i = 0; i < assoc; i++) {
+
+    for (int i = 0; i < assoc; i++) { // percorre todas as vias do conjunto
         if (cache[index][i].valid && cache[index][i].tag == tag) {
-            hits++;                                    // Incrementa hits
-            hit = 1;
-            if (substituicao[0] == 'L') {             // Atualiza LRU se necessário
-                cache[index][i].lru_counter = total_acessos;
+            hits++;     // incrementa contador de hits
+            hit = 1;    // marca que foi hit
+
+            // Atualiza contador de LRU se necessário
+            if (substituicao[0] == 'L') {
+                cache[index][i].lru_counter = total_acessos; // atualiza com timestamp do acesso
             }
-            break;                                     // Não precisa verificar outras vias
+            break; // encontrou o bloco, não precisa continuar
         }
     }
 
-    if (hit) return;                                  // Se foi HIT, não precisa fazer mais nada
+    if (hit) return; // se foi hit, não precisa carregar nada novo
 
-    // Miss: incrementa contador geral
-    miss_total++;
+    //------------------------------------
+    // Miss: precisa carregar o bloco na cache
+    //------------------------------------
+    miss_total++; // incrementa total de misses
 
-    // Chave única para saber se é a 1ª vez que a tag aparece
+    //------------------------------------
+    // Cria chave única combinando índice e tag
+    //------------------------------------
     uint64_t chave = ((uint64_t)index << 32) | tag;
-    int novo = 1;
+    /*
+     * 📌 Essa chave é usada para rastrear se o bloco já foi acessado antes.
+     * Combinar index e tag garante que blocos de conjuntos diferentes
+     * não sejam confundidos.
+     */
 
-    // Verifica se a chave já estava no conjunto visitado
+    int novo = 1; // assume que o bloco é novo
+
+    //------------------------------------
+    // Verifica se a chave já foi acessada antes, percorrendo vetor set_visitado que tem todas as tags e seus pares/chaves (indice, tag)
+    //analisando se o bloco está sendo acessado pela primeira vez e, portanto, identificar se o miss é compulsório
     for (int i = 0; i < set_visitado.size; i++) {
         if (set_visitado.tags[i] == chave) {
-            novo = 0;                                  // Já visitado
+            novo = 0; // bloco já foi acessado antes
             break;
         }
     }
-
-    // Se for nova, adiciona ao vetor de visitados
+    //------------------------------------
+    // Se for um bloco novo, adiciona ao vetor visitado
+    //------------------------------------
+    //Se o bloco for novo (novo == 1), verifica se precisa aumentar capacidade
     if (novo) {
         if (set_visitado.size == set_visitado.capacity) {
-            set_visitado.capacity *= 2;                // Dobra capacidade do vetor
+            // Dobra capacidade do vetor se necessário
+            set_visitado.capacity *= 2;
             set_visitado.tags = realloc(
                 set_visitado.tags,
-                set_visitado.capacity * sizeof(uint64_t)
+//cálculo de tamanho da memória para armazenar várias chaves.:
+                set_visitado.capacity * sizeof(uint64_t) // sizeof(uint64_t) → quantos bytes cada elemento ocupa (um inteiro de 64 bits = 8 bytes).
             );
         }
-        set_visitado.tags[set_visitado.size++] = chave;
+        set_visitado.tags[set_visitado.size++] = chave; // Armazena a nova chave (par índice + tag) no vetor TAG e atualiza/ incrementa o tamanho
+                                                            //com set_visitado.size++.
     }
-
-    // Verifica se o conjunto está cheio
+//obs: O que acontece se eu usar ++size em vez de size++?”“Daria errado porque ++size incrementaria o índice antes de usar, pulando uma posição no vetor.”
+    //------------------------------------
+    // Verifica se o conjunto (linha da cache) está cheio
+    //------------------------------------
     int set_cheio = 1;
-    for (int i = 0; i < assoc; i++) {
-        if (!cache[index][i].valid) {
-            set_cheio = 0;                             // Existe via livre
+    for (int i = 0; i < assoc; i++) { //Percorre todas as vias (i < assoc) do conjunto com índice index.
+        if (!cache[index][i].valid) {//e encontrar alguma via inválida (vazia), significa que ainda tem espaço livre no conjunto.{
+            set_cheio = 0; // encontrou via livre
             break;
         }
     }
 
-    // Classifica tipo de miss
-    if (novo && !set_cheio) {
-        miss_compulsorio++;                             // Miss compulsório
-    } else if (novo && blocos_validos < (long)nsets * assoc) {
-        miss_conflito++;                                // Miss por conflito
-    } else {
-        miss_capacidade++;                              // Miss por capacidade
-    }
-
-    // Politica de substituição
-    int via = -1;
-    for (int i = 0; i < assoc; i++) {
-        if (!cache[index][i].valid) {
-            via = i;                                    // Encontrou via livre
-            break;
-        }
-    }
-
-    if (via < 0) {                                      // Precisa substituir
-        if (substituicao[0] == 'R') {
-            via = rand() % assoc;                       // Substituição aleatória
+    //------------------------------------
+    // Classifica o tipo de miss
+    //------------------------------------
+    if (novo) {
+        if (!set_cheio) {
+            miss_compulsorio++; // primeiro acesso e há espaço livre
+        } else if (blocos_validos < (long)nsets * assoc) {
+            miss_conflito++;    // conjunto cheio mas cache tem espaço total(alguns outros conjuntos podem estar vazios).
         } else {
+            miss_capacidade++;  // cache inteira cheia
+        }
+    } else {
+        if (set_cheio) { //bloco valido: conta quantos blocos válidos já foram carregados na cache até agor
+            if (blocos_validos < (long)nsets * assoc) { //nsets * assoc = calcula o número total de blocos na cache. e long para evitar overflow
+                    //o < é: : a cache não está 100% ocupada/ ainda tem blocos disponiveis
+                miss_conflito++;
+            } else {
+                miss_capacidade++;
+            }
+        } else {
+            miss_conflito++; // chave revisitada e conjunto tem espaço
+        }
+    }
+
+    //------------------------------------
+    // Escolhe via para carregar o bloco
+    //------------------------------------
+    int via = -1;
+
+    // Procura via livre
+    for (int i = 0; i < assoc; i++) {
+        if (!cache[index][i].valid) {
+            via = i; // encontrou via livre
+            break;
+        }
+    }
+
+    // Se não houver via livre, aplica política de substituição
+    if (via < 0) {
+        if (substituicao[0] == 'R') {
+            // Substituição aleatória
+            via = rand() % assoc;
+        } else {
+            // Substituição LRU: procura via com menor contador
             via = 0;
             for (int i = 1; i < assoc; i++) {
+/*Está comparando dois blocos no mesmo conjunto (set):
+
+* cache[index][i].lru_counter: contador de acesso do bloco atual (posição i).
+*cache[index][via].lru_counter: contador do bloco candidato atual à substituição.
+
+Se o contador de i for menor, quer dizer: o bloco i foi usado há mais tempo do que o atual candidato*/
+
                 if (cache[index][i].lru_counter < cache[index][via].lru_counter) {
-                    via = i;                            // Escolhe bloco menos usado
+                    via = i;
                 }
             }
         }
     }
 
-    // Atualiza o bloco selecionado
-    if (!cache[index][via].valid) blocos_validos++;     // Incrementa blocos válidos
-    cache[index][via].valid = 1;                        // Marca como válido
-    cache[index][via].tag = tag;                        // Atualiza tag
-    cache[index][via].lru_counter = total_acessos;      // Atualiza contador LRU
-}
+    //------------------------------------
+    // Carrega o bloco na via selecionada, onde e cache[index][via].valid == 0 → significa bloco inválido.Então !cache[index][via].valid será TRUE (1).
+    //“Essa gaveta está vazia? se for 1 ta cheia /tem algo no bloco. Se for 0, tem espaço e nao precisa substituir
+    if (!cache[index][via].valid) {
+        blocos_validos++; // incrementa contador de blocos válidos
+    }
+    cache[index][via].valid = 1;              // marca como valido e sem isso o simulador vai achar que tem bloco vazio ainda e pode sobrescrever
+    cache[index][via].tag = tag;              // armazena a tag e sem atualizar a tag, a cache não consegue identificar se um endereço já está lá ou não
+    cache[index][via].lru_counter = total_acessos; // atualiza total de acessos com o contador. Se não atualizar, o simulador não vai conseguir saber qual bloco é o mais antigo e pode substituir errado.
 
-// --------------------------------------------------------
-// Função: imprimir_estatisticas
-// Descrição: imprime os resultados (absolutos ou taxas)
-// --------------------------------------------------------
+//-----------------------------------------------
+// Imprime estatísticas da simulação
+//-----------------------------------------------
 void imprimir_estatisticas(int flag, int flag_out) {
     double t_hit = (double)hits / total_acessos;
     double t_miss = (double)miss_total / total_acessos;
@@ -267,32 +344,48 @@ void imprimir_estatisticas(int flag, int flag_out) {
         t_compu = t_confl = t_capac = 0;
     }
 
-    if (flag == 0) { // imprime com opções
+    if (flag == 0) { // modo detalhado
         if (flag_out == 0 || flag_out == 1) {
-            printf("Total: %d\nHits: %d\nMisses: %d\nCompulsorios: %d\nConflito: %d\nCapacidade: %d\n",
-                total_acessos, hits, miss_total, miss_compulsorio, miss_conflito, miss_capacidade);
+            printf(
+                "Total: %d\n"
+                "Hits: %d\n"
+                "Misses: %d\n"
+                "Compulsórios: %d\n"
+                "Conflitos: %d\n"
+                "Capacidade: %d\n",
+                total_acessos, hits, miss_total,
+                miss_compulsorio, miss_conflito, miss_capacidade);
         }
         if (flag_out == 0 || flag_out == 2) {
-            printf("\n##### TAXAS #####\nHit: %.4f\nMiss: %.4f\nCompulsorios: %.4f\nConflito: %.4f\nCapacidade: %.4f\n",
+            printf("##### TAXAS ######\n");
+            printf(
+                "Hit: %.4f\n"
+                "Miss: %.4f\n"
+                "Compulsórios: %.4f\n"
+                "Conflito: %.4f\n"
+                "Capacidade: %.4f\n",
                 t_hit, t_miss, t_compu, t_confl, t_capac);
         }
-    } else { // imprime versão compacta
-        printf("%d %.4f %.4f %.4f %.4f %.4f\n",
-            total_acessos, t_hit, t_miss, t_compu, t_confl, t_capac);
+    } else { // modo resumido
+        printf(
+            "%d %.4f %.4f %.4f %.4f %.4f\n",
+            total_acessos, t_hit, t_miss,
+            t_compu, t_confl, t_capac);
     }
 }
 
-// --------------------------------------------------------
-// Função: main
-// Descrição: ponto de entrada do programa
-// --------------------------------------------------------
+//-----------------------------------------------
+// Função principal
+//-----------------------------------------------
 int main(int argc, char *argv[]) {
-    if (argc != 7) { // Verifica número de argumentos
-        printf("Número de argumentos incorreto.\nUse: ./cache_simulator.exe <nsets> <bsize> <assoc> <substituição> <flag_saida> arquivo_de_entrada\n");
-        return 1;
+    // Verifica se parâmetros foram fornecidos
+    if (argc != 7) {
+        printf("Número de argumentos incorreto. Use:\n");
+        printf("./cache_simulator.exe <nsets> <bsize> <assoc> <substituição> <flag_saida> arquivo_de_entrada\n");
+        return 1; // encerra com erro
     }
 
-    srand(time(NULL)); // Inicializa gerador aleatório
+    srand(time(NULL)); // inicializa gerador randômico para política Random
 
     // Lê parâmetros da linha de comando
     int nsets = atoi(argv[1]);
@@ -302,35 +395,40 @@ int main(int argc, char *argv[]) {
     int flag_saida = atoi(argv[5]);
     char *arquivo_entrada = argv[6];
 
-    // Valida potências de 2
+    // Verifica se parâmetros são potências de 2
     if (!is_potencia2(nsets) || !is_potencia2(bsize) || !is_potencia2(assoc)) {
         fprintf(stderr, "Erro: nsets, bsize e assoc devem ser potências de 2.\n");
         return 1;
     }
 
-    FILE *f = processar_arquivo(arquivo_entrada); // Abre arquivo
+    FILE *f = processar_arquivo(arquivo_entrada);
+    if (!f) return 1; // erro ao abrir arquivo
 
-    inicializar_cache(nsets, assoc);  // Prepara cache
-    inicializar_visitado();           // Prepara vetor de tags
+    inicializar_cache(nsets, assoc); // cria cache
+    inicializar_visitado();          // cria vetor visitado
 
-    uint32_t end;                     // Variável para armazenar endereços
+    uint32_t end;
+    // Lê cada endereço do arquivo e simula acesso
     while (fread(&end, sizeof(end), 1, f) == 1) {
         simular_acesso_cache(end, nsets, bsize, assoc, substituicao);
     }
 
-    fclose(f);                        // Fecha arquivo
+    fclose(f); // fecha arquivo
 
-    int flag_out = 3;                 // Valor padrão
-    if (!flag_saida) {                // Permite usuário escolher saída
-        printf("Exibir dados:\n[1] - Absolutos  [2] - Taxas  [0] - Ambos\n");
+    int flag_out = 3;
+    if (!flag_saida) {
+        printf("Exibir dados:\n[1] - números absolutos  [2] - taxas  [0] - ambos\n");
         scanf("%d", &flag_out);
     }
 
-    imprimir_estatisticas(flag_saida, flag_out); // Imprime resultados
+    imprimir_estatisticas(flag_saida, flag_out); // exibe estatísticas
+    liberar_visitado();                          // libera memória do vetor visitado
 
-    liberar_visitado();               // Libera memória do VisitSet
-    for (int i = 0; i < nsets; i++) free(cache[i]); // Libera cada linha
-    free(cache);                      // Libera matriz da cache
+    // libera memória da cache
+    for (int i = 0; i < nsets; i++) {
+        free(cache[i]);
+    }
+    free(cache);
 
-    return 0;
+    return 0; // sucesso
 }
